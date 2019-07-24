@@ -14,9 +14,8 @@ setup(
               'delfi.neuralnet.loss', 'delfi.simulator', 'delfi.summarystats',
               'delfi.utils'],
     license='BSD',
-    install_requires=['dill', 'lasagne==0.2.dev1', 'numpy', 'scipy', 'theano', 'tqdm', 'snl'],
+    install_requires=['dill', 'lasagne==0.2.dev1', 'numpy', 'scipy', 'theano', 'tqdm'],
     dependency_links=[
         'https://github.com/Lasagne/Lasagne/archive/master.zip#egg=lasagne-0.2.dev1',
-        'https://github.com/mnonnenm/SNL_py3port',
     ]
 )

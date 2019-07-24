@@ -70,6 +70,7 @@ class APT(BaseInference):
         self.exception_info = (None, None, None)
         self.trn_datasets, self.proposal_used = [], []
 
+
     def define_loss(self, n, round_cl=1, proposal='gaussian',
                     combined_loss=False):
         """Loss function for training
