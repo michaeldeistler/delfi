@@ -6,7 +6,9 @@ import sys
 
 from delfi.utils.progress import no_tqdm, progressbar
 from numpy.lib.stride_tricks import as_strided
-from delfi.utils.box_flow import calc_leakage
+from delfi.utils.box_flow import calc_leakage, gen_bounded_theta
+from delfi.neuralnet.loss.lossfunc import snpe_loss_prior_as_proposal
+
 
 dtype = theano.config.floatX
 
@@ -26,8 +28,10 @@ def block_circulant(x):
 class Trainer:
     def __init__(self, network, loss, trn_data, trn_inputs,
                  step=lu.adam,
-                 observe_leakage=False, leakage_thr_lower=0.02,
-                 prior=None, obs=None,
+                 observe_leakage=False,
+                 leakage_thr_lower=0.1,
+                 leakage_thr_upper=0.2,
+                 prior=None, obs=None, mode=None,
                  lr=0.001, lr_decay=1.0, max_norm=0.1,
                  monitor=None, val_frac=0., assemble_extra_inputs=None,
                  seed=None):
@@ -43,6 +47,16 @@ class Trainer:
             The neural network to train
         loss : theano variable
             Loss function to be computed for network training
+        leakage_thr_lower: float
+            If leakage exceeds this value, we retrain using MLE
+        leakage_thr_upper: float
+            During retraining, if leakage is smaller than this value, we stop
+            retraining
+        prior: delfi.distribution object
+        mode: None or 'mle' or 'atomic'.
+            Required for retraining
+        obs: array
+            observation, xO
         trn_data : tuple of arrays
             Training data in the form (params, stats)
         trn_inputs : list of theano variables
@@ -72,8 +86,10 @@ class Trainer:
         self.trn_inputs = trn_inputs
         self.observe_leakage = observe_leakage
         self.leakage_thr_lower = leakage_thr_lower
+        self.leakage_thr_upper = leakage_thr_upper
         self.prior = prior
         self.obs = obs
+        self.mode = mode
 
         self.seed = seed
         if seed is not None:
@@ -100,6 +116,7 @@ class Trainer:
         # outputs
         self.trn_outputs_names = ['loss']
         self.trn_outputs_nodes = [self.loss]
+        self.monitor = monitor
         if monitor is not None and len(monitor) > 0:
             monitor_names, monitor_nodes = zip(*monitor.items())
             self.trn_outputs_names += monitor_names
@@ -283,21 +300,60 @@ class Trainer:
                     break
 
                 if self.observe_leakage:
-                    leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=10000)
-                    if leakage < self.leakage_thr_lower:
-                        print('Achieved a leakage of', int(leakage*100), '% after', epoch+1, 'epochs. Stopping retraining.')
-                        break
-                #elif self.boxMAF_MLE:
-                #    leakage = calc_leakage(self.network.cmaf, self.generator.prior, self.obs, n_samples=10000)
-                #    if leakage > self.leakage_thr_upper:
-                #        print('Leakage of', int(leakage*100), '% detected! Retraining network using MLE.')
-                #        log_MLE, trn_data_MLE = self.run_MLE(n_train=10000, epochs=50, minibatch=50)
+                    leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=1000)
+                    if self.mode == 'mle':
+                        if leakage < self.leakage_thr_lower:
+                            print('Achieved a leakage of', int(leakage*100), '% after', epoch+1, 'epochs. Stopping retraining.')
+                            break_flag = True
+                            break
+                    elif self.mode == 'atomic':
+                        if leakage > self.leakage_thr_upper:
+                            print('Leakage of', int(leakage*100), '% detected after', epoch, 'epochs. Retraining network using MLE.')
+                            self.train_MLE(epochs=epochs, minibatch=minibatch)
+
+            if self.observe_leakage and self.mode == 'mle' and not break_flag:
+                leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=1000)
+                print('Achieved a leakage of', int(leakage * 100), '% after the maximum number of epochs, i.e.', epochs, 'epochs. Stopping retraining.')
+                if leakage > self.leakage_thr_upper:
+                    print('Leakage of', int(self.leakage_thr_upper*100), '% could not be reached! Leakage is still',
+                          int(leakage * 100), '. Please specify a higher value for leakage_thr_upper')
 
         # convert lists to arrays
         for name, value in trn_outputs.items():
             trn_outputs[name] = np.asarray(value)
 
         return trn_outputs
+
+
+    def train_MLE(self, n_train=1000, epochs=100, minibatch=50, seed=None, n_atoms=None,
+                moo=None, train_on_all=False, round_cl=1, stop_on_nan=False, monitor=None,
+                verbose=False, print_each_epoch=False, **kwargs):
+        """
+        Function to retrain the network using MLE to avoid leakage of mass.
+        """
+
+        n_train_round = self.n_trn_data
+        xs = np.repeat(self.obs, n_train_round, axis=0) # list of repeated x_obs
+        bounded_thetas = gen_bounded_theta(cmaf=self.network.cmaf, prior=self.prior,
+                                           x=self.obs, n_samples=n_train_round, rng=self.rng)
+        trn_data = (np.asarray(bounded_thetas), np.asarray(xs))
+
+        loss, trn_inputs = snpe_loss_prior_as_proposal(self.network)
+
+        t = Trainer(network=self.network,
+                    loss=loss,
+                    trn_data=trn_data, trn_inputs = trn_inputs,
+                    seed=self.gen_newseed(),
+                    observe_leakage=True,
+                    leakage_thr_upper=self.leakage_thr_upper,
+                    mode='mle',
+                    prior=self.prior, obs=self.obs,
+                    monitor=self.monitor,
+                    **kwargs)
+
+        _ = t.train(epochs=epochs, minibatch=minibatch, verbose=verbose,
+                      print_each_epoch=print_each_epoch, stop_on_nan=stop_on_nan)
+
 
     def gen_newseed(self):
         """Generates a new random seed"""
@@ -347,7 +403,10 @@ class ActiveTrainer(Trainer):
 
     def __init__(self, network, loss, trn_data, trn_inputs,
                  step=lu.adam, lr=0.001, lr_decay=1.0, max_norm=0.1,
-                 monitor=None, val_frac=0., seed=None,               
+                 monitor=None, val_frac=0., seed=None, mode=None,
+                 leakage_thr_lower=0.1,
+                 leakage_thr_upper=0.2,
+                 observe_leakage=False,
                  generator=None, n_atoms=1, moo='resample', obs=None):
         """Construct and configure the trainer
 
@@ -407,6 +466,10 @@ class ActiveTrainer(Trainer):
 
         super().__init__(network=network, loss=loss, 
             trn_data=trn_data, trn_inputs=trn_inputs,
+            mode=mode, leakage_thr_lower=leakage_thr_lower,
+            leakage_thr_upper=leakage_thr_upper,
+            observe_leakage=observe_leakage,
+            prior=generator.prior, obs=obs,
             step=step, lr=lr,lr_decay=lr_decay, max_norm=max_norm,
             monitor=monitor, val_frac=val_frac, seed=seed,
             assemble_extra_inputs=assemble_extra_inputs)

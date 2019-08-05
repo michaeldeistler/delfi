@@ -13,7 +13,8 @@ from delfi.utils.box_flow import gen_bounded_theta, calc_leakage
 from copy import deepcopy
 
 class APT(BaseInference):
-    def __init__(self, generator, obs=None, prior_norm=False, leakage_thr=0.1,
+    def __init__(self, generator, obs=None, prior_norm=False,
+                 leakage_thr_upper=0.2, leakage_thr_lower=0.1, leakage_thr_round=0.1,
                  pilot_samples=100, reg_lambda=0.01, seed=None, verbose=True,
                  boxMAF_MLE=False, **kwargs):
         """APT
@@ -33,6 +34,13 @@ class APT(BaseInference):
             samples is run. The mean and std of the summary statistics of the
             pilot samples will be subsequently used to z-transform summary
             statistics.
+        leakage_thr_lower: float
+            If leakage exceeds this value within a round, we retrain using MLE
+        leakage_thr_upper: float
+            During retraining, if leakage is smaller than this value, we stop
+            retraining
+        leakage_thr_round: float
+            If leakage exceeds this value after a round, we retrain using MLE
         n_components : int
             Number of components in final round (PM's algorithm 2)
         reg_lambda : float
@@ -68,7 +76,9 @@ class APT(BaseInference):
             raise ValueError("Observed data contains NaNs")
 
         self.reg_lambda = reg_lambda
-        self.leakage_thr = leakage_thr
+        self.leakage_thr_lower = leakage_thr_lower
+        self.leakage_thr_upper = leakage_thr_upper
+        self.leakage_thr_round = leakage_thr_round
         self.boxMAF_MLE = boxMAF_MLE
         self.exception_info = (None, None, None)
         self.trn_datasets, self.proposal_used = [], []
@@ -187,10 +197,7 @@ class APT(BaseInference):
 
         logs = []
         trn_datasets = []
-        logs_MLE = []
-        trn_datasets_MLE = []
         posteriors = []
-        posteriors_MLE = []
 
         if 'train_on_all' in kwargs.keys() and kwargs['train_on_all'] is True:
             kwargs['round_cl'] = np.inf
@@ -217,16 +224,7 @@ class APT(BaseInference):
             trn_datasets.append(trn_data)
             posteriors.append(self.predict(self.obs))
 
-            if self.boxMAF_MLE and self.round > 1:
-                leakage = calc_leakage(self.network.cmaf, self.generator.prior, self.obs, n_samples=10000)
-                if leakage > self.leakage_thr:
-                    print('Leakage of', int(leakage*100), '% detected after round', self.round, '! Retraining network using MLE.')
-                    log_MLE, trn_data_MLE = self.run_MLE(**kwargs)
-                    logs_MLE.append(log_MLE)
-                    trn_datasets_MLE.append(trn_data_MLE)
-                    posteriors_MLE.append(self.predict(self.obs))
-
-        return logs, trn_datasets, posteriors, logs_MLE, trn_datasets_MLE, posteriors_MLE
+        return logs, trn_datasets, posteriors#, logs_MLE, trn_datasets_MLE, posteriors_MLE
 
     def run_round(self, proposal=None, **kwargs):
 
@@ -331,6 +329,7 @@ class APT(BaseInference):
                                                  proposal='gaussian')
         t = Trainer(self.network,
                     self.loss,
+                    prior=self.generator.prior,
                     trn_data=trn_data, trn_inputs=trn_inputs,
                     seed=self.gen_newseed(),
                     monitor=self.monitor_dict_from_names(monitor),
@@ -383,6 +382,10 @@ class APT(BaseInference):
 
         t = ActiveTrainer(self.network,
                           self.loss,
+                          leakage_thr_lower=self.leakage_thr_lower,
+                          leakage_thr_upper=self.leakage_thr_upper,
+                          observe_leakage=self.boxMAF_MLE,
+                          mode='atomic',
                           trn_data=trn_data, trn_inputs=trn_inputs,
                           seed=self.gen_newseed(),
                           monitor=self.monitor_dict_from_names(monitor),
@@ -394,6 +397,14 @@ class APT(BaseInference):
 
         log = t.train(epochs=self.epochs_round(epochs), minibatch=minibatch, verbose=verbose,
                       print_each_epoch=print_each_epoch, strict_batch_size=True)
+
+        if self.boxMAF_MLE and self.round > 1:
+            leakage = calc_leakage(self.network.cmaf, self.generator.prior,
+                                   (self.obs - self.stats_mean) / self.stats_std, n_samples=1000)
+            if leakage > self.leakage_thr_round:
+                print('Leakage of', int(leakage * 100), '% detected after round', self.round,
+                      '! Retraining network using MLE.')
+                t.train_MLE(epochs=epochs, minibatch=minibatch)
 
         return log, trn_data
 
@@ -436,6 +447,7 @@ class APT(BaseInference):
                                                  proposal='mog')
         t = Trainer(self.network,
                     self.loss,
+                    prior=self.generator.prior,
                     trn_data=trn_data, trn_inputs=trn_inputs,
                     seed=self.gen_newseed(),
                     monitor=self.monitor_dict_from_names(monitor),
@@ -449,6 +461,9 @@ class APT(BaseInference):
     def run_MLE(self, n_train=1000, epochs=100, minibatch=50, seed=None, n_atoms=None,
                 moo=None, train_on_all=False, round_cl=1, stop_on_nan=False, monitor=None,
                 verbose=False, print_each_epoch=False, **kwargs):
+        """Function is almost identical to train_MLE in Trainer.py
+           This function is used to retrain the network AFTER rounds, not within rounds.
+        """
 
         n_train_round = self.n_train_round(n_train)
         xs = np.repeat(self.obs, n_train_round, axis=0) # list of repeated x_obs
@@ -465,7 +480,8 @@ class APT(BaseInference):
                     trn_data=trn_data, trn_inputs = trn_inputs,
                     seed=self.gen_newseed(),
                     observe_leakage=True,
-                    leakage_thr_lower=self.leakage_thr,
+                    mode='mle',
+                    leakage_thr_upper=self.leakage_thr_upper,
                     prior=self.generator.prior, obs=self.obs,
                     monitor=self.monitor_dict_from_names(monitor),
                     **kwargs)
