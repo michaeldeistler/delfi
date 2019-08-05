@@ -137,6 +137,9 @@ class APT(BaseInference):
         """Run algorithm
         Parameters
         ----------
+        trn_data: list
+            tuple of summstats and paramters. If provided, training data is
+            taken instead of generated
         n_train : int or list of ints
             Number of data points drawn per round. If a list is passed, the
             nth list element specifies the number of training examples in the
@@ -218,8 +221,7 @@ class APT(BaseInference):
                 leakage = calc_leakage(self.network.cmaf, self.generator.prior, self.obs, n_samples=10000)
                 if leakage > self.leakage_thr:
                     print('Leakage of', int(leakage*100), '% detected after round', self.round, '! Retraining network using MLE.')
-                    log_MLE, trn_data_MLE = self.run_MLE(n_train=300, epochs=50,
-                                                         leakage_thr_lower=0.10, minibatch=50)
+                    log_MLE, trn_data_MLE = self.run_MLE(**kwargs)
                     logs_MLE.append(log_MLE)
                     trn_datasets_MLE.append(trn_data_MLE)
                     posteriors_MLE.append(self.predict(self.obs))
@@ -243,12 +245,17 @@ class APT(BaseInference):
         else:
             raise NotImplemented()
 
-    def run_prior(self, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None, train_on_all=False, round_cl=1,
+    def run_prior(self, trn_data=None, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None, train_on_all=False, round_cl=1,
                   stop_on_nan=False, monitor=None, verbose=False, print_each_epoch=False, reuse_prior_samples=True, **kwargs):
 
         # simulate data
         self.generator.proposal = self.generator.prior
-        trn_data, n_train_round = self.gen(n_train)
+
+        # if training data is provided, load data. Otherwise generate data.
+        if trn_data is not None:
+            trn_data, n_train_round = self.set_trn_data(trn_data, n_train)
+        else:
+            trn_data, n_train_round = self.gen(n_train)
         self.trn_datasets.append(trn_data)
 
         if train_on_all and reuse_prior_samples:
@@ -272,7 +279,7 @@ class APT(BaseInference):
 
         return log, trn_data
 
-    def run_gaussian(self, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None,  train_on_all=False,
+    def run_gaussian(self, trn_data=None, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None,  train_on_all=False,
                      round_cl=1, stop_on_nan=False, monitor=None, verbose=False, print_each_epoch=False,
                      reuse_prior_samples=True, **kwargs):
 
@@ -280,7 +287,11 @@ class APT(BaseInference):
         self.set_proposal(project_to_gaussian=True)
         prop = self.generator.proposal
         assert isinstance(prop, dd.Gaussian)
-        trn_data, n_train_round = self.gen(n_train)
+        # if training data is provided, load data. Otherwise generate data.
+        if trn_data is not None:
+            trn_data, n_train_round = self.set_trn_data(trn_data, n_train)
+        else:
+            trn_data, n_train_round = self.gen(n_train)
 
         # here we're just repeating the same fixed proposal, though we
         # could also introduce some variety if we wanted.
@@ -330,7 +341,7 @@ class APT(BaseInference):
 
         return log, trn_data
 
-    def run_atomic(self, n_train=100, epochs=100, minibatch=50, n_atoms=10, moo='resample', train_on_all=False,
+    def run_atomic(self, trn_data=None, n_train=100, epochs=100, minibatch=50, n_atoms=10, moo='resample', train_on_all=False,
                    reuse_prior_samples=True, combined_loss=False, round_cl=1, stop_on_nan=False, monitor=None,
                    verbose=False, print_each_epoch=False, **kwargs):
 
@@ -342,9 +353,13 @@ class APT(BaseInference):
         if n_atoms is None:
             n_atoms = minibatch - 1 if theano.config.device.startswith('cuda') else np.minimum(minibatch - 1, 9)
         assert n_atoms < minibatch, "Minibatch too small for this many atoms"
-        # simulate data
+
         self.set_proposal()
-        trn_data, n_train_round = self.gen(n_train)
+        # if training data is provided, load data. Otherwise generate data.
+        if trn_data is not None:
+            trn_data, n_train_round = self.set_trn_data(trn_data, n_train)
+        else:
+            trn_data, n_train_round = self.gen(n_train)
         self.trn_datasets.append(trn_data)  # don't store prior_masks
 
         if train_on_all:
@@ -382,7 +397,7 @@ class APT(BaseInference):
 
         return log, trn_data
 
-    def run_MoG(self, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None, train_on_all=False, round_cl=1,
+    def run_MoG(self, trn_data=None, n_train=100, epochs=100, minibatch=50, n_atoms=None, moo=None, train_on_all=False, round_cl=1,
                 stop_on_nan=False, monitor=None, verbose=False, print_each_epoch=False, reuse_prior_samples=True,
                 **kwargs):
         assert not train_on_all, "train_on_all is not yet implemented for MoG "\
@@ -392,7 +407,11 @@ class APT(BaseInference):
         self.set_proposal(project_to_gaussian=False)
         prop = self.generator.proposal
         assert isinstance(prop, dd.MoG)
-        trn_data, n_train_round = self.gen(n_train)
+        # if training data is provided, load data. Otherwise generate data.
+        if trn_data is not None:
+            trn_data, n_train_round = self.set_trn_data(trn_data, n_train)
+        else:
+            trn_data, n_train_round = self.gen(n_train)
 
         # here we're just repeating the same fixed proposal, though we
         # could also introduce some variety if we wanted.
@@ -427,16 +446,17 @@ class APT(BaseInference):
 
         return log, trn_data
 
-    def run_MLE(self, n_train=1000, epochs=100, minibatch=50, seed=None, leakage_thr_lower=0.02,
+    def run_MLE(self, n_train=1000, epochs=100, minibatch=50, seed=None, n_atoms=None,
                 moo=None, train_on_all=False, round_cl=1, stop_on_nan=False, monitor=None,
                 verbose=False, print_each_epoch=False, **kwargs):
 
-        xs = np.repeat(self.obs, n_train, axis=0) # list of repeated x_obs
+        n_train_round = self.n_train_round(n_train)
+        xs = np.repeat(self.obs, n_train_round, axis=0) # list of repeated x_obs
         bounded_thetas = gen_bounded_theta(cmaf=self.network.cmaf, prior=self.generator.prior,
-                                           x=self.obs, n_samples=n_train, rng=self.rng)
+                                           x=self.obs, n_samples=n_train_round, rng=self.rng)
         trn_data = (np.asarray(bounded_thetas), np.asarray(xs))
 
-        loss, trn_inputs = self.define_loss(n=n_train,
+        loss, trn_inputs = self.define_loss(n=n_train_round,
                                             round_cl=round_cl,
                                             proposal='prior')
 
@@ -445,7 +465,7 @@ class APT(BaseInference):
                     trn_data=trn_data, trn_inputs = trn_inputs,
                     seed=self.gen_newseed(),
                     observe_leakage=True,
-                    leakage_thr_lower=leakage_thr_lower,
+                    leakage_thr_lower=self.leakage_thr,
                     prior=self.generator.prior, obs=self.obs,
                     monitor=self.monitor_dict_from_names(monitor),
                     **kwargs)
@@ -518,3 +538,28 @@ class APT(BaseInference):
             epochs_round = epochs
 
         return epochs_round
+
+    def set_trn_data(self, trn_data, n_train):
+        n_train_round = self.n_train_round(n_train)
+        n_samples = deepcopy(n_train_round)
+        params = np.zeros((0, self.generator.prior.ndim), dtype=dtype)
+        stats = np.zeros((0, self.generator.summary.n_summary), dtype=dtype)
+        n_pilot = np.minimum(n_samples, len(self.unused_pilot_samples[0]))
+        if n_pilot > 0 and self.generator.proposal is self.generator.prior:  # reuse pilot samples
+            params = self.unused_pilot_samples[0][:n_pilot, :]
+            stats = self.unused_pilot_samples[1][:n_pilot, :]
+            self.unused_pilot_samples = \
+                (self.unused_pilot_samples[0][n_pilot:, :],
+                 self.unused_pilot_samples[1][n_pilot:, :])
+            n_samples -= n_pilot
+        if n_samples > 0:
+            params_rem = trn_data[0]
+            stats_rem = trn_data[1]
+            params = np.concatenate((params, params_rem), axis=0)
+            stats = np.concatenate((stats, stats_rem), axis=0)
+            # z-transform params and stats
+        params = (params - self.params_mean) / self.params_std
+        stats = (stats - self.stats_mean) / self.stats_std
+        trn_data = (params, stats)
+        n_train_round = trn_data[0].shape[0]
+        return trn_data, n_train_round
