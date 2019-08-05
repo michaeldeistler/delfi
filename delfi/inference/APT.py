@@ -14,9 +14,10 @@ from copy import deepcopy
 
 class APT(BaseInference):
     def __init__(self, generator, obs=None, prior_norm=False,
-                 leakage_thr_upper=0.2, leakage_thr_lower=0.1, leakage_thr_round=0.1,
                  pilot_samples=100, reg_lambda=0.01, seed=None, verbose=True,
-                 boxMAF_MLE=False, **kwargs):
+                 boxMAF_MLE=False,
+                 leakage_thr_upper=0.2, leakage_thr_lower=0.1, leakage_thr_round=0.1,
+                 **kwargs):
         """APT
         Core idea is to parameterize the true posterior, and calculate the
         proposal posterior as needed on-the-fly.
@@ -34,6 +35,8 @@ class APT(BaseInference):
             samples is run. The mean and std of the summary statistics of the
             pilot samples will be subsequently used to z-transform summary
             statistics.
+        boxMAF_MLE: bool
+            Whether to retrain using MLE or not. Enforces boundedness of MAF
         leakage_thr_lower: float
             If leakage exceeds this value within a round, we retrain using MLE
         leakage_thr_upper: float
@@ -402,7 +405,8 @@ class APT(BaseInference):
             leakage = calc_leakage(self.network.cmaf, self.generator.prior,
                                    (self.obs - self.stats_mean) / self.stats_std, n_samples=1000)
             if leakage > self.leakage_thr_round:
-                print('Leakage of', int(leakage * 100), '% detected after round', self.round,
+                if verbose:
+                    print('Leakage of', int(leakage * 100), '% detected after round', self.round,
                       '! Retraining network using MLE.')
                 t.train_MLE(epochs=epochs, minibatch=minibatch)
 

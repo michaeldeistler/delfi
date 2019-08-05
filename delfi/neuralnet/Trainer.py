@@ -8,7 +8,7 @@ from delfi.utils.progress import no_tqdm, progressbar
 from numpy.lib.stride_tricks import as_strided
 from delfi.utils.box_flow import calc_leakage, gen_bounded_theta
 from delfi.neuralnet.loss.lossfunc import snpe_loss_prior_as_proposal
-
+import warnings
 
 dtype = theano.config.floatX
 
@@ -299,24 +299,36 @@ class Trainer:
                 if break_flag:
                     break
 
+                # check leakage and retrain if necessary
                 if self.observe_leakage:
                     leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=1000)
-                    if self.mode == 'mle':
+                    if self.mode == 'mle': # retrain mode. Check if leakage has become good enough.
                         if leakage < self.leakage_thr_lower:
-                            print('Achieved a leakage of', int(leakage*100), '% after', epoch+1, 'epochs. Stopping retraining.')
+                            if verbose:
+                                print('Achieved a leakage of', int(leakage*100), '% after', epoch+1,
+                                      'epochs. Stopping retraining.')
                             break_flag = True
                             break
-                    elif self.mode == 'atomic':
+                    elif self.mode == 'atomic': # train mode. Check if leakage has exceeded the threshold.
                         if leakage > self.leakage_thr_upper:
-                            print('Leakage of', int(leakage*100), '% detected after', epoch, 'epochs. Retraining network using MLE.')
-                            self.train_MLE(epochs=epochs, minibatch=minibatch)
+                            if verbose:
+                                print('Leakage of', int(leakage*100), '% detected after', epoch,
+                                      'epochs. Retraining network using MLE.')
+                            self.train_MLE(epochs=epochs, minibatch=minibatch, verbose=verbose)
 
-            if self.observe_leakage and self.mode == 'mle' and not break_flag:
-                leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=1000)
-                print('Achieved a leakage of', int(leakage * 100), '% after the maximum number of epochs, i.e.', epochs, 'epochs. Stopping retraining.')
-                if leakage > self.leakage_thr_upper:
-                    print('Leakage of', int(self.leakage_thr_upper*100), '% could not be reached! Leakage is still',
-                          int(leakage * 100), '. Please specify a higher value for leakage_thr_upper')
+        if self.observe_leakage and self.mode == 'mle' and not break_flag:
+            leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=1000)
+            # warning in case leakage threshold was specified to low.
+            if leakage > self.leakage_thr_upper:
+                warn_str = 'Leakage of '+str(int(self.leakage_thr_upper*100)) +\
+                        '% could not be reached! Leakage is still ' + str(int(leakage * 100)) +\
+                        '%. Please specify a higher value for leakage_thr_upper.'
+                warnings.warn(warn_str)
+            elif verbose:
+                print('Achieved a leakage of', int(leakage * 100),
+                      '% after the maximum number of epochs, i.e.', epochs, 'epochs. Stopping retraining.')
+
+
 
         # convert lists to arrays
         for name, value in trn_outputs.items():
@@ -345,6 +357,7 @@ class Trainer:
                     trn_data=trn_data, trn_inputs = trn_inputs,
                     seed=self.gen_newseed(),
                     observe_leakage=True,
+                    leakage_thr_lower=self.leakage_thr_lower,
                     leakage_thr_upper=self.leakage_thr_upper,
                     mode='mle',
                     prior=self.prior, obs=self.obs,
