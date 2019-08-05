@@ -154,6 +154,16 @@ class BaseInference(metaclass=ABCMetaDoc):
         self.kwargs['seed'] = self.gen_newseed()
         self.norm_init()
 
+    def reinit_network_MLE(self):
+        """Reinitializes the network instance (re-setting the weights!)
+        """
+        self.network_MLE = NeuralNet(**self.kwargs)
+        self.svi = self.network.svi if 'svi' in dir(self.network) else False
+        """update self.kwargs['seed'] so that reinitializing the network gives a
+        different result each time unless we reseed the inference method"""
+        self.kwargs['seed'] = self.gen_newseed()
+        self.norm_init()
+
     def centre_on_obs(self):
         """ Centres first-layer input onto observed summary statistics
 

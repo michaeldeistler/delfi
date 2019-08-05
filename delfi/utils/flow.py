@@ -49,3 +49,4 @@ def normalize_cmaf(cmaf, f_accept, xs, n_samples=10, seed=None, val_frac=0.1,
                 trn_inputs=trn_inputs, seed=seed + 5)
     log = t.train(epochs=epochs, minibatch=minibatch,
                   verbose=verbose, stop_on_nan=stop_on_nan, val_frac=val_frac)
+

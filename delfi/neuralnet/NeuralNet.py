@@ -8,7 +8,7 @@ import numpy as np
 import theano
 import theano.tensor as tt
 from copy import deepcopy
-from snl.ml.models.mafs import ConditionalMaskedAutoregressiveFlow
+from snl.ml.models.mafs import ConditionalMaskedAutoregressiveFlow, MaskedAutoregressiveFlow
 
 from delfi.utils.data import isint
 from delfi.utils.odict import first, last, nth
@@ -230,6 +230,7 @@ class NeuralNet(object):
         self.aps = prev_params + self.cmaf.parms
         self.lprobs = self.cmaf.L  # model log-likelihood
         self.dlprobs = self.lprobs  # svi not possible
+
 
     def init_mdn(self, svi=False, n_components=1, rank=None,
                  mdn_actfun=lnl.tanh, homoscedastic=False, **unused_kwargs):

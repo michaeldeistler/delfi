@@ -9,12 +9,13 @@ from delfi.neuralnet.loss.lossfunc import \
      apt_loss_MoG_proposal, apt_loss_atomic_proposal)
 from delfi.neuralnet.NeuralNet import dtype
 from delfi.utils.data import repnewax, combine_trn_datasets
-
+from delfi.utils.box_flow import gen_bounded_theta, calc_leakage
+from copy import deepcopy
 
 class APT(BaseInference):
-    def __init__(self, generator, obs=None, prior_norm=False,
+    def __init__(self, generator, obs=None, prior_norm=False, leakage_thr=0.1,
                  pilot_samples=100, reg_lambda=0.01, seed=None, verbose=True,
-                 **kwargs):
+                 boxMAF_MLE=False, **kwargs):
         """APT
         Core idea is to parameterize the true posterior, and calculate the
         proposal posterior as needed on-the-fly.
@@ -67,9 +68,10 @@ class APT(BaseInference):
             raise ValueError("Observed data contains NaNs")
 
         self.reg_lambda = reg_lambda
+        self.leakage_thr = leakage_thr
+        self.boxMAF_MLE = boxMAF_MLE
         self.exception_info = (None, None, None)
         self.trn_datasets, self.proposal_used = [], []
-
 
     def define_loss(self, n, round_cl=1, proposal='gaussian',
                     combined_loss=False):
@@ -130,7 +132,8 @@ class APT(BaseInference):
 
         return loss, trn_inputs
 
-    def run(self, n_rounds=1, proposal='gaussian', silent_fail=True, **kwargs):
+    def run(self, n_rounds=1, proposal='gaussian', silent_fail=True,
+            **kwargs):
         """Run algorithm
         Parameters
         ----------
@@ -144,6 +147,9 @@ class APT(BaseInference):
         proposal : str
             Specifier for type of proposal used: continuous ('gaussian', 'mog')
             or 'atomic' proposals are implemented.
+        boxMAF_MLE: bool
+            trains a new normalizing flow after each round using Maximum like-
+            lihood. Leads to bounded MAFs and solves the issue of leaking mass
         epochs : int
             Number of epochs used for neural network training
         minibatch : int
@@ -178,7 +184,10 @@ class APT(BaseInference):
 
         logs = []
         trn_datasets = []
+        logs_MLE = []
+        trn_datasets_MLE = []
         posteriors = []
+        posteriors_MLE = []
 
         if 'train_on_all' in kwargs.keys() and kwargs['train_on_all'] is True:
             kwargs['round_cl'] = np.inf
@@ -205,7 +214,17 @@ class APT(BaseInference):
             trn_datasets.append(trn_data)
             posteriors.append(self.predict(self.obs))
 
-        return logs, trn_datasets, posteriors
+            if self.boxMAF_MLE and self.round > 1:
+                leakage = calc_leakage(self.network.cmaf, self.generator.prior, self.obs, n_samples=10000)
+                if leakage > self.leakage_thr:
+                    print('Leakage of', int(leakage*100), '% detected after round', self.round, '! Retraining network using MLE.')
+                    log_MLE, trn_data_MLE = self.run_MLE(n_train=300, epochs=50,
+                                                         leakage_thr_lower=0.10, minibatch=50)
+                    logs_MLE.append(log_MLE)
+                    trn_datasets_MLE.append(trn_data_MLE)
+                    posteriors_MLE.append(self.predict(self.obs))
+
+        return logs, trn_datasets, posteriors, logs_MLE, trn_datasets_MLE, posteriors_MLE
 
     def run_round(self, proposal=None, **kwargs):
 
@@ -404,6 +423,34 @@ class APT(BaseInference):
                     **kwargs)
 
         log = t.train(epochs=self.epochs_round(epochs), minibatch=minibatch, verbose=verbose,
+                      print_each_epoch=print_each_epoch, stop_on_nan=stop_on_nan)
+
+        return log, trn_data
+
+    def run_MLE(self, n_train=1000, epochs=100, minibatch=50, seed=None, leakage_thr_lower=0.02,
+                moo=None, train_on_all=False, round_cl=1, stop_on_nan=False, monitor=None,
+                verbose=False, print_each_epoch=False, **kwargs):
+
+        xs = np.repeat(self.obs, n_train, axis=0) # list of repeated x_obs
+        bounded_thetas = gen_bounded_theta(cmaf=self.network.cmaf, prior=self.generator.prior,
+                                           x=self.obs, n_samples=n_train, rng=self.rng)
+        trn_data = (np.asarray(bounded_thetas), np.asarray(xs))
+
+        loss, trn_inputs = self.define_loss(n=n_train,
+                                            round_cl=round_cl,
+                                            proposal='prior')
+
+        t = Trainer(network=self.network,
+                    loss=loss,
+                    trn_data=trn_data, trn_inputs = trn_inputs,
+                    seed=self.gen_newseed(),
+                    observe_leakage=True,
+                    leakage_thr_lower=leakage_thr_lower,
+                    prior=self.generator.prior, obs=self.obs,
+                    monitor=self.monitor_dict_from_names(monitor),
+                    **kwargs)
+
+        log = t.train(epochs=epochs, minibatch=minibatch, verbose=verbose,
                       print_each_epoch=print_each_epoch, stop_on_nan=stop_on_nan)
 
         return log, trn_data

@@ -6,6 +6,7 @@ import sys
 
 from delfi.utils.progress import no_tqdm, progressbar
 from numpy.lib.stride_tricks import as_strided
+from delfi.utils.box_flow import calc_leakage
 
 dtype = theano.config.floatX
 
@@ -24,7 +25,10 @@ def block_circulant(x):
 
 class Trainer:
     def __init__(self, network, loss, trn_data, trn_inputs,
-                 step=lu.adam, lr=0.001, lr_decay=1.0, max_norm=0.1,
+                 step=lu.adam,
+                 observe_leakage=False, leakage_thr_lower=0.02,
+                 prior=None, obs=None,
+                 lr=0.001, lr_decay=1.0, max_norm=0.1,
                  monitor=None, val_frac=0., assemble_extra_inputs=None,
                  seed=None):
         """Construct and configure the trainer
@@ -66,6 +70,10 @@ class Trainer:
         self.loss = loss
         self.trn_data = trn_data
         self.trn_inputs = trn_inputs
+        self.observe_leakage = observe_leakage
+        self.leakage_thr_lower = leakage_thr_lower
+        self.prior = prior
+        self.obs = obs
 
         self.seed = seed
         if seed is not None:
@@ -273,6 +281,17 @@ class Trainer:
                     print('.')
                 if break_flag:
                     break
+
+                if self.observe_leakage:
+                    leakage = calc_leakage(self.network.cmaf, self.prior, self.obs, n_samples=10000)
+                    if leakage < self.leakage_thr_lower:
+                        print('Achieved a leakage of', int(leakage*100), '% after', epoch+1, 'epochs. Stopping retraining.')
+                        break
+                #elif self.boxMAF_MLE:
+                #    leakage = calc_leakage(self.network.cmaf, self.generator.prior, self.obs, n_samples=10000)
+                #    if leakage > self.leakage_thr_upper:
+                #        print('Leakage of', int(leakage*100), '% detected! Retraining network using MLE.')
+                #        log_MLE, trn_data_MLE = self.run_MLE(n_train=10000, epochs=50, minibatch=50)
 
         # convert lists to arrays
         for name, value in trn_outputs.items():
