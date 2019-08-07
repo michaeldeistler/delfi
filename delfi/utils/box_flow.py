@@ -18,11 +18,15 @@ def gen_bounded_theta(cmaf, prior, x, n_samples, rng=None):
     thetas = np.empty((0, len(prior.lower)))
     n_accepted = 0
     while n_accepted < n_samples:
-        next_thetas = cmaf.gen(x=x, n_samples=n_samples - n_accepted, rng=rng)
+        n_generate = np.maximum(50, np.minimum(10000, n_samples-n_accepted))
+        print('n_generate', n_generate)
+        next_thetas = cmaf.gen(x=x, n_samples=n_generate, rng=rng) # TODO: CHECK IF THIS WAS THE PROBLEM!
         bounded_criterion = theta_are_bounded(next_thetas, prior)
         bounded_theta = next_thetas[bounded_criterion]
         thetas = np.concatenate((thetas, bounded_theta))
         n_accepted += int(np.sum(bounded_criterion))
+        print('n_accepted', n_accepted)
+    thetas = thetas[:n_samples]
     return thetas
 
 
